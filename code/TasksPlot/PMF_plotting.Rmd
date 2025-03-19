@@ -1,0 +1,375 @@
+---
+title: "PMF_plotting"
+author: "Ashley Tyrer"
+date: "2025-02-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(cmdstanr, tidyverse,posterior, bayesplot, tidybayes, furrr,
+               rstan, brms, faux,LRO.utilities,reticulate,
+               patchwork)
+install.packages("loo")
+
+np <- import("numpy")
+source(here::here("code/TasksPlot","plots.R"))
+```
+
+# load HRDT-Intero data & plot
+```{r}
+#'#6c4c98' 
+
+    sub = '0409'
+    
+    # load HRDT raw subject data for first visit
+    df = read_delim(paste0("/mnt/cortex/ecg/raw/PROJECTS/VMP_AUX/AUX/hrd/", sub,"HRD/", sub, "HRD_final.txt"))
+    df <- df %>% filter(Modality == "Intero")
+    
+    # load HRDT subject numpy array (PSI trajectory) for first visit    
+    interoPost = np$load(paste0("/mnt/cortex/ecg/raw/PROJECTS/VMP_AUX/AUX/hrd/", sub, "HRD/", sub, "Intero_posterior.npy"))
+    interoPost_hrd = intervals(df,interoPost)%>% mutate(Modality = "Intero") #get the intervals for Intero condition
+    
+    #get the subjects fitted psychometric (from Hierarchical model):
+    model_intero <- readRDS('/mnt/raid0/scratch/BIDS/derivatives/hrd/R/HierarchicalEstimates/HRD/stanmodel/Normal_intero.RDS') 
+    
+    # find subject index 
+    model_intero_summary <- read.csv('/mnt/raid0/scratch/BIDS/derivatives/hrd/R/HierarchicalEstimates/HRD/Hierarchical_HRD_Intero.csv')
+    sub_model_idx <- model_intero_summary$idx[which(grepl(sub, model_intero_summary$participant_id))]
+    
+    
+    ## FIG 1 ##
+    
+    fontsize = 28 
+    plot1_hrd = rbind(interoPost_hrd) %>% 
+      mutate(Response = ifelse(Decision == "More","Faster","Slower")) %>% 
+      ggplot(aes()) +
+      geom_point(aes(x = trials, y = Alpha, shape = Response), size = 3) +
+      scale_shape_manual(values = c(15, 17)) +
+      geom_line(aes(x = x, y = EstimatedThreshold), linewidth = 1.1) +
+      geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1) +
+      geom_ribbon(aes(x = x, ymin = lower, ymax = upper), fill = '#BB4A4C', alpha = 0.5) +
+      guides(color = "none", alpha = "none", fill = "none",
+             shape = guide_legend(direction = "horizontal")) +
+      scale_x_continuous(name = "#Trials", limits = c(0, nrow(interoPost_hrd)), breaks = seq(0, nrow(df), by = 20)) +
+      scale_y_continuous(name = expression(paste("Intensity  (", Delta ~~ "BPM)")), limits = c(-50,50), breaks = seq(-50,50,20))+
+      theme_classic()+
+      theme(legend.position = c(0.6,0.8),
+            text = element_text(size = fontsize),         
+            axis.title = element_text(size = fontsize),   
+            axis.text = element_text(size = fontsize),    
+            legend.text = element_text(size = fontsize),  
+            legend.title = element_text(size = fontsize)  
+      )
+    
+    #dd = interoPost_hrd %>% mutate(Decision_num = ifelse(Decision == "More",1,0),
+    #                               Decision = ifelse(Decision == "More","Faster","Slower"))
+    
+    
+    ## FIG 2 ##
+    
+    # draw the subject from the hierarchical HRDT model
+    parameters <- as_draws_df(model_intero$draws(c(paste0('alpha[', sub_model_idx,']'),paste0('beta[', sub_model_idx,']'),paste0('lapse[', sub_model_idx,']'))))%>% select(-contains(".")) %>% 
+      mutate(draw = 1:n())
+    # select the draws to plot:
+    draw_id = sample(1:nrow(parameters),200) # sample 200 
+    # get probability of responding: through stimulus values of -40 through 40
+    trialwise_draws = parameters %>% filter(draw %in% draw_id) %>%
+      rename_with(~c("alpha","beta","lapse","draw")) %>%
+      mutate(x = list(seq(-40,40,by = 0.1))) %>% unnest(x) %>%
+      mutate(prob = lapse+(1-2*lapse) * (0.5+0.5*pracma::erf((x-alpha)/beta*sqrt(2))))
+    
+    # plot hrdt intero prob
+    fontsize = 28
+    plot2_hrd = trialwise_draws %>% ggplot(aes(x = x, y = prob, group = draw))+ geom_line(alpha = 0.1, color = '#BB4A4C')  + #linewidth = 0.75,
+      coord_flip()+
+      scale_x_continuous(name = expression(paste("Intensity  (", Delta, " BPM)")), limits = c(-40,40), breaks = seq(-40,40,10))+
+      scale_y_continuous(name = "P(Faster)", limits = c(0,1), breaks = seq(0,1,0.5), labels = function(x) ifelse(x %in% c(0, 1), as.character(x), "0.5")) +
+      theme_classic()+
+      theme(axis.text.y = element_blank(),
+            axis.ticks.y = element_blank(),
+            axis.title.y = element_blank(),
+            legend.position = "none") +
+      guides(col = "none")+
+      theme(text = element_text(size = fontsize),         
+            axis.title = element_text(size = fontsize),   
+            axis.text = element_text(size = fontsize),    
+            legend.text = element_text(size = fontsize), 
+            legend.title = element_text(size = fontsize)  
+      )
+    
+    
+    
+    #combine
+    plot_draws_hrd = plot1_hrd+plot2_hrd+ plot_layout(widths = c(4, 1))
+    #save
+    ggsave("~/Git/multi-intero/figs/TaskFigs/hrd_fig_2.png",plot_draws_hrd, height = 7, width = 12, dpi = 300)
+
+    
+```
+
+# load HRDT-Extero & plot
+```{r}
+
+    sub = '0409'
+    
+    # load HRDT raw subject data for first visit
+    #df = read_delim(paste0("/mnt/cortex/ecg/raw/PROJECTS/VMP_AUX/AUX/1_VMP_aux/sub_", sub, "/", sub, "HRD/", sub, "HRD_final.txt")) 
+    df = read_delim(paste0("/mnt/cortex/ecg/raw/PROJECTS/VMP_AUX/AUX/hrd/", sub,"HRD/", sub, "HRD_final.txt"))
+    df <- df %>% filter(Modality == "Extero")
+    
+    # load HRDT subject numpy array (PSI trajectory) for first visit    
+    #exteroPost = np$load(paste0("/mnt/cortex/ecg/raw/PROJECTS/VMP_AUX/AUX/1_VMP_aux/sub_", sub, "/", sub, "HRD/", sub, "Extero_posterior.npy")) 
+    exteroPost = np$load(paste0("/mnt/cortex/ecg/raw/PROJECTS/VMP_AUX/AUX/hrd/", sub, "HRD/", sub, "Extero_posterior.npy"))
+    exteroPost_extero = intervals(df,exteroPost)%>% mutate(Modality = "Extero") #get the intervals for Extero condition
+    
+    #get the subjects fitted psychometric (from Hierarchical model):
+    model_extero <- readRDS('/mnt/raid0/scratch/BIDS/derivatives/hrd/R/HierarchicalEstimates/HRD/stanmodel/Normal_extero.RDS') 
+    
+    # find subject index 
+    model_extero_summary <- read.csv('/mnt/raid0/scratch/BIDS/derivatives/hrd/R/HierarchicalEstimates/HRD/Hierarchical_HRD_Extero.csv')
+    sub_model_idx <- model_extero_summary$idx[which(grepl(sub, model_extero_summary$participant_id))]
+    
+    fontsize = 28 
+    plot1_extero = rbind(exteroPost_extero) %>% 
+      mutate(Response = ifelse(Decision == "More","Faster","Slower")) %>% 
+      ggplot(aes()) +
+      geom_point(aes(x = trials, y = Alpha, shape = Response), size = 3) +
+      scale_shape_manual(values = c(15, 17)) +
+      geom_line(aes(x = x, y = EstimatedThreshold), linewidth = 1.1) +
+      geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1) +
+      geom_ribbon(aes(x = x, ymin = lower, ymax = upper), fill = '#fabd14' , alpha = 0.5) +
+      guides(color = "none", alpha = "none", fill = "none",
+             shape = guide_legend(direction = "horizontal")) +
+      scale_x_continuous(name = "#Trials", limits = c(0, nrow(exteroPost_extero)), breaks = seq(0, nrow(df), by = 20)) +
+      scale_y_continuous(name = expression(paste("Intensity  (", Delta ~~ "BPM)")), limits = c(-50,50), breaks = seq(-50,50,20))+
+      theme_classic()+
+      theme(legend.position = c(0.6,0.8),
+            text = element_text(size = fontsize),         
+            axis.title = element_text(size = fontsize),   
+            axis.text = element_text(size = fontsize),    
+            legend.text = element_text(size = fontsize),  
+            legend.title = element_text(size = fontsize)  
+      )
+    
+    #dd = exteroPost_extero %>% mutate(Decision_num = ifelse(Decision == "More",1,0),
+    #                               Decision = ifelse(Decision == "More","Faster","Slower"))
+    
+    
+    # draw the subject from the hierarchical HRDT model
+    parameters <- as_draws_df(model_extero$draws(c(paste0('alpha[', sub_model_idx,']'),paste0('beta[', sub_model_idx,']'),paste0('lapse[', sub_model_idx,']'))))%>% select(-contains(".")) %>% 
+      mutate(draw = 1:n())
+    # select the draws to plot:
+    draw_id = sample(1:nrow(parameters),200) # sample 200 
+    # get probability of responding: through stimulus values of -40 through 40
+    trialwise_draws = parameters %>% filter(draw %in% draw_id) %>%
+      rename_with(~c("alpha","beta","lapse","draw")) %>%
+      mutate(x = list(seq(-40,40,by = 0.1))) %>% unnest(x) %>%
+      mutate(prob = lapse+(1-2*lapse) * (0.5+0.5*pracma::erf((x-alpha)/beta*sqrt(2))))
+    
+    # plot hrdt extero prob
+    fontsize = 28
+    plot2_extero = trialwise_draws %>% ggplot(aes(x = x, y = prob, group = draw))+ geom_line(alpha = 0.1, color = '#fabd14')  + #linewidth = 0.75,
+      coord_flip()+
+      scale_x_continuous(name = expression(paste("Intensity  (", Delta, " BPM)")), limits = c(-40,40), breaks = seq(-40,40,10))+
+      scale_y_continuous(name = "P(Faster)", limits = c(0,1), breaks = seq(0,1,0.5), labels = function(x) ifelse(x %in% c(0, 1), as.character(x), "0.5")) +
+      theme_classic()+
+      theme(axis.text.y = element_blank(),
+            axis.ticks.y = element_blank(),
+            axis.title.y = element_blank(),
+            legend.position = "none") +
+      guides(col = "none")+
+      theme(text = element_text(size = fontsize),         
+            axis.title = element_text(size = fontsize),   
+            axis.text = element_text(size = fontsize),    
+            legend.text = element_text(size = fontsize), 
+            legend.title = element_text(size = fontsize)  
+      )
+    
+    
+    #combine
+    plot_draws_extero = plot1_extero + plot2_extero + plot_layout(widths = c(4, 1))
+    #save
+    ggsave("~/Git/multi-intero/figs/TaskFigs/extero_fig.png",plot_draws_extero, height = 7, width = 12, dpi = 300)
+    
+
+```
+
+# RRST plots
+```{r}
+
+    sub = '0360' #'0404'
+    
+    # load RRST raw subject data 
+    df = read_tsv('/home/niia/Documents/VMPdata/Respiroception/rrst_trial_summary.tsv') #read_delim(paste0("/mnt/raid0/scratch/BIDS/sub-", sub, "/ses-session1/beh/sub-", sub, "_ses-session1_task-rrst_beh.tsv"))
+    df <- df %>% filter(participant_id == paste0('sub-',sub))
+    
+    #get the subjects fitted psychometric (from Hierarchical model):
+    model_rrst <- readRDS('/mnt/raid0/scratch/BIDS/derivatives/rrst/HierarchicalEstimates/saved model/RRST_noguess.RDS')  
+
+    # find subject index 
+    model_rrst_summary <- read.csv('/mnt/raid0/scratch/BIDS/derivatives/rrst/HierarchicalEstimates/Hierarchical_RRST.csv')
+    sub_model_idx <- model_rrst_summary$subject[which(grepl(sub, model_rrst_summary$participant_id))]
+    
+    
+    # first plot
+    stimms = c(0,8.5,17) #renaming for the x-axis:
+    labelss = round((stimms/ 17) * 100,0) #renaming for the x-axis:
+    plot1_rrst = df %>% mutate(mean = thresh, se = SEthresh, Response = ifelse(response == 1, "Correct","Incorrect"))  %>%  
+      mutate(trial = 1:n()) %>% 
+      ggplot(aes(fill = task))+
+      geom_point(aes(x = trial, y = stimLevel, shape = Response), size = 3) +
+      # shapes' shape
+      scale_shape_manual(values = c(16, 4)) +
+      geom_line(aes(x = trial, y = mean),size = 1.1) +
+      # confidence interval
+      geom_ribbon(aes(x = trial, y = mean, ymin = mean-2*se, ymax = mean+2*se), alpha = 0.3, fill = "#0B96BC")+
+      # themes and text
+      guides(color = "none", alpha = "none", fill = "none",
+             shape = guide_legend(direction = "horizontal")) +
+      scale_x_continuous(name = "#Trials", limits = c(0, nrow(df)), breaks = seq(0, nrow(df), by = 20)) +
+      scale_y_continuous(name = expression(paste("Intensity (% resistance)")), limits = c(-2.5,22.5), breaks = stimms, labels = labelss)+
+      theme_classic()+
+      theme(legend.position = c(0.6,0.8),
+            text = element_text(size = 28),         # Global text size
+            axis.title = element_text(size = 28),   # Axis titles
+            axis.text = element_text(size = 28),    # Axis tick labels
+            legend.text = element_text(size = 28),  # Legend text
+            legend.title = element_text(size = 28)  # Legend title (if applicable)
+      )
+      #+scale_fill_manual(values = "#0B96BC")
+    
+    
+    
+    # get draws of parameters
+    parameters <- as_draws_df(model_rrst$draws(c(paste0('alpha[', sub_model_idx,']'),paste0('beta[', sub_model_idx,']'),paste0('lapse[', sub_model_idx,']'))))%>% select(-contains("."))  %>% mutate(draw = 1:n())
+    # select the draws to plot:
+    draw_id = sample(1:nrow(parameters),200)
+    # rrst
+    trialwise_draws = parameters %>% filter(draw %in% draw_id) %>%
+      rename_with(~c("alpha","beta","lapse","draw")) %>%
+      mutate(x = list(seq(0,100,by = 0.1))) %>% unnest(x) %>% # change what "x" is thus between 0 and 20 but if you want to have it on the same scale of the % intensity you can do a conversion between these 0 to 20  -> 0 to 100
+      mutate(beta = exp(beta), lapse = brms::inv_logit_scaled(lapse) / 2) %>%
+      mutate(prob = 0.5 + (0.5 - lapse) * (1 - exp(-10^(beta*(x-alpha))))) 
+    #trialwise_draws %>% ggplot(aes(x = x, y = prob, group = draw))+ geom_line(alpha = 0.1)
+    
+    
+     # plot2 rrst prob psychometric
+    fontsize = 28
+    plot2_rrst = trialwise_draws %>% ggplot(aes(x = x, y = prob, group = draw))+ geom_line(alpha = 0.1, color = '#2196a5')  + #linewidth = 0.75,
+      coord_flip()+
+      scale_x_continuous(name = expression(paste("Intensity")), limits = c(0,22.5), breaks = stimms, labels = labelss) + #breaks = seq(-2.5,22.5,10))   limits = c(-2.5,22.5)
+      scale_y_continuous(name = "P(Correct)", limits = c(0.5,1), breaks = c(0.5,1))+
+      theme_classic()+
+      theme(axis.text.y = element_blank(),
+            axis.ticks.y = element_blank(),
+            axis.title.y = element_blank(),
+            plot.margin = margin(10, 10, 10, 20),
+            legend.position = "none") +
+      guides(col = "none")+
+      theme(text = element_text(size = fontsize),         
+            axis.title = element_text(size = fontsize),   
+            axis.text = element_text(size = fontsize),    
+            legend.text = element_text(size = fontsize), 
+            legend.title = element_text(size = fontsize)  
+      )
+    
+  
+    #combine
+    plot_draws_rrst = plot1_rrst + plot2_rrst + plot_layout(widths = c(4, 1))
+    #save
+    ggsave("~/Git/multi-intero/figs/TaskFigs/rrst_fig_360.png",plot_draws_rrst, height = 7, width = 12, dpi = 300)
+  
+```
+```{r}
+
+# Required packages:
+# install.packages(c("readr", "dplyr", "RColorBrewer", "GGally", "ggplot2", "apaTables"))
+rm(list = ls())
+
+library(readr)
+library(dplyr)
+library(RColorBrewer)
+library(GGally)
+library(apaTables)
+source("code/get_all_bad_subjects.R")
+
+# 1) Read your data. Replace path as appropriate.
+alldata <- read_csv("data/mergedvmpdata_all.csv")
+# load metacognition 
+metad_indiv <- read.csv('~/Git/multi-intero/data/metad_indivfits.csv')
+
+# merge
+alldata <- merge(alldata, metad_indiv, by.x = "participant_id", by.y = "V1", all = TRUE)
+
+
+# 2) Subset only the RRST and HRD variables.
+int_data <- alldata %>%
+  select(
+    rrst_estimated_mean_alpha,
+    rrst_estimated_mean_beta,
+    rrst_mean_confidence,
+    mratio_rrst,
+    hrd_estimated_mean_alpha,
+    hrd_estimated_mean_beta,
+    hrd_mean_confidence,
+    mratio_hrd,
+    extero_estimated_mean_alpha,
+    extero_estimated_mean_beta,
+    extero_mean_confidence,
+    mratio_extero
+  )
+
+
+# # Loop through each column in int_data and plot histograms
+# for (col in names(int_data)) {
+#   hist(na.omit(int_data[[col]]), main = col, xlab = "Value", col = "lightblue", border = "black")
+# }
+
+# RRST slope contains negative values (log space) so should exponentiate them to get in 'real space'
+int_data[ ,'rrst_estimated_mean_beta'] <- exp(int_data[ ,'rrst_estimated_mean_beta'])
+
+# compute absolute hrd (intero and extero) threshold 
+int_data[ ,'hrd_estimated_mean_alpha'] <- abs(int_data[ ,'hrd_estimated_mean_alpha'])
+int_data[ ,'extero_estimated_mean_alpha'] <- abs(int_data[ ,'extero_estimated_mean_alpha'])
+
+# Optional: rename for clarity
+int_data <- int_data %>%
+  rename(
+    "Respiratory Sensitivity" = rrst_estimated_mean_alpha,
+    "Respiratory Precision" = rrst_estimated_mean_beta,
+    "Respiratory Confidence" = rrst_mean_confidence,
+    "Respiratory Metacognition" = mratio_rrst,
+    "Cardiac Sensitivity" = hrd_estimated_mean_alpha,
+    "Cardiac Precision" = hrd_estimated_mean_beta,
+    "Cardiac Confidence" = hrd_mean_confidence,
+    "Cardiac Metacognition" = mratio_hrd,
+    "Auditory Sensitivity" = extero_estimated_mean_alpha,
+    "Auditory Precision" = extero_estimated_mean_beta,
+    "Auditory Confidence" = extero_mean_confidence,
+    "Auditory Metacognition" = mratio_extero
+  )
+
+# Replace negative M-Ratio values with NA 
+cols_to_modify <- c("Cardiac Metacognition", "Auditory Metacognition", "Respiratory Metacognition")
+int_data[cols_to_modify] <- lapply(int_data[cols_to_modify], function(x) ifelse(x < 0, NA, x))
+
+#cols_to_modify <- colnames(int_data)
+# remove high outliers from M-Ratio (MAD-based outlier removal to selected columns)
+int_data[cols_to_modify] <- lapply(int_data[cols_to_modify], function(x) {
+  median_x <- median(x, na.rm = TRUE)
+  mad_x <- mad(x, na.rm = TRUE)
+  x[abs(x - median_x) > 3 * mad_x] <- NA
+  return(x) 
+})
+
+
+# Loop through each column in int_data and plot histograms
+for (col in names(int_data)) {
+  hist(na.omit(int_data[[col]]), main = col, xlab = "Value", col = "lightblue", border = "black")
+}
+
+```
+
